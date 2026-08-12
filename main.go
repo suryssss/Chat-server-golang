@@ -4,6 +4,8 @@ package main
 // installing UUID library so we can assign each chat a unique id
 
 import (
+	"encoding/json"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -21,7 +23,7 @@ type ClientManager struct {
 type Client struct {
 	id     string
 	socket *websocket.Conn
-	Send   chan []byte
+	send   chan []byte
 }
 
 type Message struct {
@@ -44,6 +46,47 @@ var manager = ClientManager{
 
 // read and write goroutines will get a new instance everytime they connect with a client
 
-func (manager *ClientManager) start() {
+// a simple function to send messages
 
+func (manager *ClientManager) send(message []byte, client *Client) {
+	client.send <- message
+}
+
+func (manager *ClientManager) start() {
+	for {
+		select {
+
+		// everytime manager.register channel has data the client will be added to the map of avaliable clients by the client manager
+		// and a message will be sent to the client saying that the client has been added
+
+		case conn := <-manager.register:
+			manager.clients[conn] = true
+			jsonMessage, _ := json.Marshal(&Message{Content: "/A new socket has been added"})
+			manager.send(jsonMessage, conn)
+
+			// everytime manager.broadcast channel has data the client manager will send the data to all the clients
+			// and if the client manager is not able to send the data to the client then the client will be removed from the map of avaliable clients
+
+		case conn := <-manager.unregister:
+			if _, ok := manager.clients[conn]; ok {
+				delete(manager.clients, conn)
+				jsonMessage, _ := json.Marshal(&Message{Content: "/A socket has been removed"})
+
+				manager.broadcast <- jsonMessage
+			}
+
+			// every time manager.broadcast channel has data the client manager will send the data to all the clients
+			// and if the client manager is not able to send the data to the client then the client will be removed from the map of avaliable clients
+
+		case message := <-manager.broadcast:
+			for conn := range manager.clients {
+				select {
+				case conn.send <- message:
+				default:
+					close(conn.send)
+					delete(manager.clients, conn)
+				}
+			}
+		}
+	}
 }
