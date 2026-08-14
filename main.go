@@ -5,8 +5,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 
 	"github.com/gorilla/websocket"
+	uuid "github.com/satori/go.uuid"
 )
 
 // clientManager : keeps track of all the connected status of the users
@@ -48,10 +51,6 @@ var manager = ClientManager{
 
 // a simple function to send messages
 
-func (manager *ClientManager) send(message []byte, client *Client) {
-	client.send <- message
-}
-
 func (manager *ClientManager) start() {
 	for {
 		select {
@@ -72,7 +71,9 @@ func (manager *ClientManager) start() {
 				delete(manager.clients, conn)
 				jsonMessage, _ := json.Marshal(&Message{Content: "/A socket has been removed"})
 
-				manager.broadcast <- jsonMessage
+				go func() {
+					manager.broadcast <- jsonMessage
+				}()
 			}
 
 			// every time manager.broadcast channel has data the client manager will send the data to all the clients
@@ -89,4 +90,75 @@ func (manager *ClientManager) start() {
 			}
 		}
 	}
+}
+
+//to send messages to each of the client
+
+func (manager *ClientManager) send(message []byte, ignore *Client) {
+	for conn := range manager.clients {
+		if conn != ignore {
+			select {
+			case conn.send <- message:
+			default:
+				close(conn.send)
+				delete(manager.clients, conn)
+			}
+		}
+	}
+}
+
+func (c *Client) read() {
+	defer func() {
+		manager.unregister <- c
+		c.socket.Close()
+	}()
+
+	for {
+		_, message, err := c.socket.ReadMessage()
+		if err != nil {
+			manager.unregister <- c
+			c.socket.Close()
+			break
+		}
+		jsonMessage, _ := json.Marshal(&Message{Sender: c.id, Content: string(message)})
+		manager.broadcast <- jsonMessage
+	}
+}
+
+func (c *Client) write() {
+	defer func() {
+		c.socket.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			if !ok {
+				c.socket.WriteMessage(websocket.CloseMessage, []byte(""))
+				return
+			}
+			c.socket.WriteMessage(websocket.TextMessage, message)
+		}
+	}
+}
+
+func main() {
+	fmt.Println("Starting the application")
+	go manager.start()
+	http.HandleFunc("/ws", wsPage)
+	http.ListenAndServe(":12345", nil)
+}
+
+func wsPage(res http.ResponseWriter, req *http.Request) {
+	conn, error := (&websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}).Upgrade(res, req, nil)
+	if error != nil {
+		http.NotFound(res, req)
+		return
+	}
+	client := &Client{id: uuid.NewV4().String(), socket: conn, send: make(chan []byte)}
+
+	manager.register <- client
+
+	go client.read()
+	go client.write()
 }
